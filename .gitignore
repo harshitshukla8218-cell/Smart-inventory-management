@@ -1,0 +1,20 @@
+# Environment configuration and secrets
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Frontend
+node_modules/
+dist/
+dist-ssr/
+
+# Local tooling
+.vscode/
+.idea/
+.DS_Store
