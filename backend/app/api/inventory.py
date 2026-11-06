@@ -1,4 +1,7 @@
+import csv
+import io
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -8,6 +11,7 @@ from app.core.database import get_db
 from app.api.deps import get_current_user, require_inventory
 from app.models.user import User
 from app.models.inventory import Inventory, InventoryTransaction, Warehouse, TransactionType
+from app.models.product import Product
 from app.schemas.inventory import (
     InventoryCreate, InventoryUpdate, InventoryResponse,
     InventoryAdjustRequest, InventoryTransactionResponse,
@@ -65,7 +69,10 @@ async def list_inventory(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    query = select(Inventory)
+    query = select(Inventory).options(
+        selectinload(Inventory.product),
+        selectinload(Inventory.warehouse),
+    )
     if warehouse_id:
         query = query.where(Inventory.warehouse_id == warehouse_id)
     if product_id:
@@ -88,6 +95,173 @@ async def create_inventory(
     await db.commit()
     await db.refresh(inv)
     return inv
+
+
+@router.post("/import")
+async def import_inventory_csv(
+    warehouse_id: UUID,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_inventory),
+):
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Upload a .csv file")
+
+    content = await file.read(5 * 1024 * 1024 + 1)
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="CSV file must be 5 MB or smaller")
+
+    try:
+        reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig"), newline=""))
+        headers = {header.strip().lower() for header in (reader.fieldnames or [])}
+        if not {"sku", "quantity"}.issubset(headers):
+            raise HTTPException(
+                status_code=400,
+                detail="CSV must include sku and quantity columns",
+            )
+
+        rows = []
+        seen_skus = set()
+        errors = []
+        for line_number, row in enumerate(reader, start=2):
+            normalized = {
+                (key or "").strip().lower(): (value or "").strip()
+                for key, value in row.items()
+            }
+            sku = normalized.get("sku", "")
+            if not sku:
+                errors.append(f"Line {line_number}: SKU is required")
+                continue
+            if sku in seen_skus:
+                errors.append(f"Line {line_number}: duplicate SKU '{sku}'")
+                continue
+            seen_skus.add(sku)
+
+            try:
+                quantity = int(normalized.get("quantity", ""))
+                min_stock = int(normalized.get("min_stock_level") or 10)
+                reorder_level = int(normalized.get("reorder_level") or 20)
+                if min(quantity, min_stock, reorder_level) < 0:
+                    raise ValueError
+            except ValueError:
+                errors.append(
+                    f"Line {line_number}: quantity and stock levels must be non-negative whole numbers"
+                )
+                continue
+
+            rows.append((line_number, sku, quantity, min_stock, reorder_level))
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded") from exc
+    except csv.Error as exc:
+        raise HTTPException(status_code=400, detail="Could not parse CSV file") from exc
+    finally:
+        await file.close()
+
+    if not rows and not errors:
+        raise HTTPException(status_code=400, detail="CSV contains no inventory rows")
+
+    warehouse = await db.scalar(
+        select(Warehouse).where(Warehouse.id == warehouse_id, Warehouse.is_active.is_(True))
+    )
+    if not warehouse:
+        raise HTTPException(status_code=404, detail="Active warehouse not found")
+
+    products_result = await db.execute(
+        select(Product).where(Product.sku.in_([row[1] for row in rows]))
+    )
+    products_by_sku = {product.sku: product for product in products_result.scalars()}
+    inventory_result = await db.execute(
+        select(Inventory).where(
+            Inventory.warehouse_id == warehouse_id,
+            Inventory.product_id.in_([product.id for product in products_by_sku.values()]),
+        )
+    )
+    inventory_by_product = {
+        inventory.product_id: inventory for inventory in inventory_result.scalars()
+    }
+
+    resolved_rows = []
+    for line_number, sku, quantity, min_stock, reorder_level in rows:
+        product = products_by_sku.get(sku)
+        if not product:
+            errors.append(f"Line {line_number}: unknown SKU '{sku}'")
+            continue
+        inventory = inventory_by_product.get(product.id)
+        if inventory and quantity - inventory.available_quantity + inventory.total_quantity < 0:
+            errors.append(
+                f"Line {line_number}: quantity would make total stock negative for SKU '{sku}'"
+            )
+            continue
+        resolved_rows.append(
+            (line_number, product, inventory, quantity, min_stock, reorder_level)
+        )
+
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "No rows were imported; correct the CSV and retry.", "errors": errors},
+        )
+
+    created_count = 0
+    updated_count = 0
+    unchanged_count = 0
+    for _, product, inventory, quantity, min_stock, reorder_level in resolved_rows:
+        if inventory is None:
+            inventory = Inventory(
+                product_id=product.id,
+                warehouse_id=warehouse_id,
+                total_quantity=quantity,
+                available_quantity=quantity,
+                min_stock_level=min_stock,
+                reorder_level=reorder_level,
+                updated_by=current_user.id,
+            )
+            db.add(inventory)
+            await db.flush()
+            db.add(
+                InventoryTransaction(
+                    inventory_id=inventory.id,
+                    transaction_type=TransactionType.ADJUSTMENT,
+                    quantity_change=quantity,
+                    quantity_before=0,
+                    quantity_after=quantity,
+                    notes="Opening stock imported from CSV",
+                    created_by=current_user.id,
+                )
+            )
+            created_count += 1
+            continue
+
+        delta = quantity - inventory.available_quantity
+        inventory.min_stock_level = min_stock
+        inventory.reorder_level = reorder_level
+        if delta:
+            before = inventory.available_quantity
+            inventory.available_quantity = quantity
+            inventory.total_quantity += delta
+            inventory.updated_by = current_user.id
+            db.add(
+                InventoryTransaction(
+                    inventory_id=inventory.id,
+                    transaction_type=TransactionType.ADJUSTMENT,
+                    quantity_change=delta,
+                    quantity_before=before,
+                    quantity_after=quantity,
+                    notes="Available stock reconciled from CSV import",
+                    created_by=current_user.id,
+                )
+            )
+            updated_count += 1
+        else:
+            unchanged_count += 1
+
+    await db.commit()
+    return {
+        "warehouse": warehouse.name,
+        "created": created_count,
+        "updated": updated_count,
+        "unchanged": unchanged_count,
+    }
 
 
 @router.get("/{inventory_id}", response_model=InventoryResponse)

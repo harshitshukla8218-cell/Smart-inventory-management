@@ -33,14 +33,16 @@ async def allocate_sales_order(
             any_allocated = True
             continue
 
-        inv_result = await db.execute(
-            select(Inventory)
-            .where(
-                Inventory.product_id == item.product_id,
-                Inventory.available_quantity > 0,
+        inventory_query = select(Inventory).where(
+            Inventory.product_id == item.product_id,
+            Inventory.available_quantity > 0,
+        )
+        if order.warehouse_id:
+            inventory_query = inventory_query.where(
+                Inventory.warehouse_id == order.warehouse_id
             )
-            .order_by(Inventory.available_quantity.desc())
-            .with_for_update()
+        inv_result = await db.execute(
+            inventory_query.order_by(Inventory.available_quantity.desc()).with_for_update()
         )
         inventory_records = inv_result.scalars().all()
 

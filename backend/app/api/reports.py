@@ -1,14 +1,14 @@
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import case, select, func
-from datetime import datetime, timezone
+from sqlalchemy import case, select, func, distinct
+from datetime import date, datetime, time, timedelta, timezone
 import io
 from app.core.database import get_db
 from app.api.deps import get_current_user, require_management
 from app.models.user import User
 from app.models.inventory import Inventory, InventoryTransaction, Warehouse
-from app.models.sales_order import SalesOrder, SalesOrderStatus
+from app.models.sales_order import SalesOrder, SalesOrderItem, SalesOrderStatus
 from app.models.purchase_order import PurchaseOrder, POStatus
 from app.models.procurement import ProcurementRequest, ProcurementStatus
 from app.models.product import Product, Category
@@ -317,6 +317,68 @@ async def sales_summary(
     )
     rows = result.all()
     return {row.status.value: row.count for row in rows}
+
+
+@router.get("/sales/daily")
+async def daily_sales_report(
+    report_date: date | None = None,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    day = report_date or datetime.now(timezone.utc).date()
+    start = datetime.combine(day, time.min)
+    end = start + timedelta(days=1)
+    completed_orders = SalesOrder.status == SalesOrderStatus.COMPLETED
+    dispatched_on_day = (
+        SalesOrder.updated_at >= start,
+        SalesOrder.updated_at < end,
+    )
+
+    totals = await db.execute(
+        select(
+            func.count(distinct(SalesOrder.id)),
+            func.coalesce(func.sum(SalesOrderItem.quantity_allocated), 0),
+            func.coalesce(
+                func.sum(SalesOrderItem.quantity_allocated * SalesOrderItem.unit_price),
+                0,
+            ),
+        )
+        .join(SalesOrderItem, SalesOrderItem.sales_order_id == SalesOrder.id)
+        .where(completed_orders, *dispatched_on_day)
+    )
+    order_count, units_sold, revenue = totals.one()
+
+    product_totals = await db.execute(
+        select(
+            Product.sku,
+            Product.name,
+            func.coalesce(func.sum(SalesOrderItem.quantity_allocated), 0).label("units_sold"),
+            func.coalesce(
+                func.sum(SalesOrderItem.quantity_allocated * SalesOrderItem.unit_price),
+                0,
+            ).label("revenue"),
+        )
+        .join(SalesOrderItem, SalesOrderItem.product_id == Product.id)
+        .join(SalesOrder, SalesOrderItem.sales_order_id == SalesOrder.id)
+        .where(completed_orders, *dispatched_on_day)
+        .group_by(Product.sku, Product.name)
+        .order_by(Product.name)
+    )
+    return {
+        "date": day.isoformat(),
+        "completed_orders": order_count or 0,
+        "units_sold": units_sold or 0,
+        "revenue": float(revenue or 0),
+        "products": [
+            {
+                "sku": row.sku,
+                "name": row.name,
+                "units_sold": row.units_sold,
+                "revenue": float(row.revenue or 0),
+            }
+            for row in product_totals
+        ],
+    }
 
 
 @router.get("/procurement/summary")

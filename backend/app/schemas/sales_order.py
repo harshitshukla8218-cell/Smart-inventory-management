@@ -6,6 +6,19 @@ from decimal import Decimal
 from app.models.sales_order import SalesOrderStatus, OrderPriority
 
 
+class SalesOrderProductSummary(BaseModel):
+    id: UUID
+    sku: str
+    name: str
+    model_config = {"from_attributes": True}
+
+
+class SalesOrderWarehouseSummary(BaseModel):
+    id: UUID
+    name: str
+    model_config = {"from_attributes": True}
+
+
 class SalesOrderItemCreate(BaseModel):
     product_id: UUID
     quantity_requested: int
@@ -22,6 +35,7 @@ class SalesOrderItemResponse(BaseModel):
     quantity_pending: int
     unit_price: Decimal
     notes: Optional[str] = None
+    product: Optional[SalesOrderProductSummary] = None
     model_config = {"from_attributes": True}
 
 
@@ -55,6 +69,7 @@ class SalesOrderResponse(BaseModel):
     priority: OrderPriority
     created_by: Optional[UUID] = None
     warehouse_id: Optional[UUID] = None
+    warehouse: Optional[SalesOrderWarehouseSummary] = None
     notes: Optional[str] = None
     created_at: datetime
     updated_at: datetime

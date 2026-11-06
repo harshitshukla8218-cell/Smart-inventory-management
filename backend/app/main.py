@@ -1,25 +1,26 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from fastapi import HTTPException
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from app.core.config import settings
-from app.core.database import create_tables
+from app.core.database import engine
 from app.core.redis_client import get_redis, close_redis
 
 # Import all models to register them with SQLAlchemy metadata
 import app.models  # noqa: F401
 
 from app.api import auth, users, products, inventory, vendors, procurement, purchase_orders, warehouse_receipts, sales_orders, notifications, reports, websocket
+from init_db import initialize_database
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    # Startup
+    await initialize_database()
     await get_redis()
-    # Note: In production use Alembic migrations instead of create_tables()
-    # await create_tables()
     yield
-    # Shutdown
     await close_redis()
 
 
@@ -65,4 +66,18 @@ async def root():
 
 @app.get("/health", tags=["Health"])
 async def health():
-    return {"status": "healthy", "environment": settings.ENVIRONMENT}
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection is unavailable",
+        ) from exc
+
+    return {
+        "status": "healthy",
+        "environment": settings.ENVIRONMENT,
+        "database": "connected",
+        "database_engine": engine.url.get_backend_name(),
+    }

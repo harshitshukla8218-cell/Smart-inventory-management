@@ -102,6 +102,16 @@ All accounts are pre-seeded with the password: `Demo@1234`
 
 ---
 
+### Database
+
+The backend uses a real persistent SQL database, not browser-only mock data.
+Local development defaults to `backend/smart_inventory.db` (SQLite); tables
+and demo records are created automatically when the API starts with an empty
+database. The Render deployment is configured for PostgreSQL through
+`DATABASE_URL`, which must be supplied as a private environment variable.
+Inventory, orders, vendors, users, and reports are read from and written to
+that database through the FastAPI API.
+
 ## 🏃 Running the Application
 
 ### 1. Backend Server

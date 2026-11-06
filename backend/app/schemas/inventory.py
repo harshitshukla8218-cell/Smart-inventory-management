@@ -54,10 +54,26 @@ class InventoryUpdate(BaseModel):
     reorder_level: Optional[int] = None
 
 
+class InventoryProductSummary(BaseModel):
+    id: UUID
+    sku: str
+    name: str
+    brand: Optional[str] = None
+    model_config = {"from_attributes": True}
+
+
+class InventoryWarehouseSummary(BaseModel):
+    id: UUID
+    name: str
+    model_config = {"from_attributes": True}
+
+
 class InventoryResponse(BaseModel):
     id: UUID
     product_id: UUID
+    product: Optional[InventoryProductSummary] = None
     warehouse_id: UUID
+    warehouse: Optional[InventoryWarehouseSummary] = None
     total_quantity: int
     available_quantity: int
     reserved_quantity: int

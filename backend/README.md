@@ -71,16 +71,25 @@ pip install -r requirements.txt
 ### 2. Configure environment
 ```bash
 cp .env.example .env
-# Edit .env with your database URL, Redis URL, etc.
+# The default uses the persistent local SQLite file smart_inventory.db.
+# For a hosted database, set DATABASE_URL to your PostgreSQL connection string.
 ```
 
-### 3. Run database migrations
+### 3. Initialize the database
 ```bash
-alembic revision --autogenerate -m "initial"
-alembic upgrade head
+python init_db.py
 ```
+The API also runs this initialization at startup. Tables are created and the
+demo dataset is loaded only when the database has no users.
 
-### 4. Seed initial data (optional)
+To load a client's opening/current stock count, use **CSV Template** and
+**Import Stock CSV** on the Inventory page. Choose a warehouse and provide
+`sku,quantity,min_stock_level,reorder_level`; `quantity` is the available
+physical count, and each change is added to the inventory audit. Products must
+already exist in the product catalog. Sales are entered as sales orders and
+counted as sold only after a fully allocated order is dispatched.
+
+### 4. Seed initial data manually (optional)
 ```bash
 python seed.py
 ```

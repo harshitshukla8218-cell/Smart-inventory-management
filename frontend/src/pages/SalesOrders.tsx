@@ -12,6 +12,7 @@ import {
   User,
   ShoppingBag,
   ExternalLink,
+  Truck,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
@@ -33,17 +34,25 @@ export const SalesOrders: React.FC = () => {
   const [priority, setPriority] = useState<'LOW' | 'NORMAL' | 'HIGH' | 'URGENT'>('NORMAL');
   const [orderNotes, setOrderNotes] = useState('');
   const [allocationNotice, setAllocationNotice] = useState<any | null>(null);
+  const [dailySummary, setDailySummary] = useState<{
+    date: string;
+    completed_orders: number;
+    units_sold: number;
+    revenue: number;
+  } | null>(null);
 
   const fetchOrders = async () => {
     try {
-      const [ordRes, prodRes, whRes] = await Promise.all([
+      const [ordRes, prodRes, whRes, dailyRes] = await Promise.all([
         api.get('/sales-orders'),
         api.get('/products'),
         api.get('/warehouses'),
+        api.get('/reports/sales/daily'),
       ]);
       setOrders(ordRes.data);
       setProducts(prodRes.data);
       setWarehouses(whRes.data);
+      setDailySummary(dailyRes.data);
       if (prodRes.data.length > 0 && !selectedProductId) {
         setSelectedProductId(prodRes.data[0].id);
       }
@@ -52,6 +61,8 @@ export const SalesOrders: React.FC = () => {
       }
       if (ordRes.data.length > 0 && !selectedOrder) {
         setSelectedOrder(ordRes.data[0]);
+      } else if (selectedOrder) {
+        setSelectedOrder(ordRes.data.find((order: SalesOrder) => order.id === selectedOrder.id) || null);
       }
     } catch (err) {
       console.error('Failed to load orders', err);
@@ -79,7 +90,8 @@ export const SalesOrders: React.FC = () => {
         items: [
           {
             product_id: selectedProductId,
-            quantity: quantity,
+            quantity_requested: quantity,
+            unit_price: products.find((product) => product.id === selectedProductId)?.unit_price || 0,
           },
         ],
       });
@@ -104,6 +116,19 @@ export const SalesOrders: React.FC = () => {
       fetchOrders();
     } catch (err) {
       console.error('Allocation error', err);
+    }
+  };
+
+  const handleDispatch = async (orderId: string) => {
+    try {
+      const response = await api.post(`/sales-orders/${orderId}/dispatch`);
+      setAllocationNotice({
+        message: `${response.data.order_number} dispatched. Inventory and the daily sales report have been updated.`,
+      });
+      await fetchOrders();
+    } catch (error) {
+      const detail = (error as { response?: { data?: { detail?: string } } }).response?.data?.detail;
+      setAllocationNotice({ message: detail || 'Could not dispatch this order.' });
     }
   };
 
@@ -172,6 +197,25 @@ export const SalesOrders: React.FC = () => {
         </div>
       )}
 
+      {dailySummary && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Completed orders today</p>
+            <p className="mt-1 text-2xl font-extrabold text-slate-900">{dailySummary.completed_orders}</p>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Units sold today</p>
+            <p className="mt-1 text-2xl font-extrabold text-slate-900">{dailySummary.units_sold}</p>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold text-slate-500">Sales value today (catalog price)</p>
+            <p className="mt-1 text-2xl font-extrabold text-slate-900">
+              {dailySummary.revenue.toLocaleString('en-IN', { style: 'currency', currency: 'INR' })}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Orders Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="p-4 border-b border-slate-200 font-bold text-sm text-slate-900 flex items-center justify-between">
@@ -217,7 +261,7 @@ export const SalesOrders: React.FC = () => {
                     <td className="py-4 px-4">{getStatusBadge(so.status)}</td>
                     <td className="py-4 px-4 text-slate-500">{new Date(so.created_at).toLocaleDateString()}</td>
                     <td className="py-4 px-4 text-right">
-                      {so.status !== 'FULLY_ALLOCATED' && (
+                      {!['FULLY_ALLOCATED', 'COMPLETED', 'CANCELLED'].includes(so.status) && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -247,7 +291,17 @@ export const SalesOrders: React.FC = () => {
                 {selectedOrder.order_number} — {selectedOrder.customer_name}
               </h3>
             </div>
-            {getStatusBadge(selectedOrder.status)}
+            <div className="flex items-center gap-3">
+              {getStatusBadge(selectedOrder.status)}
+              {selectedOrder.status === 'FULLY_ALLOCATED' && (
+                <button
+                  onClick={() => handleDispatch(selectedOrder.id)}
+                  className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg inline-flex items-center gap-2"
+                >
+                  <Truck className="w-4 h-4" /> Dispatch Order
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="overflow-x-auto border border-slate-200 rounded-xl">

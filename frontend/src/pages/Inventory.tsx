@@ -13,6 +13,8 @@ import {
   XCircle,
   Building2,
   Boxes,
+  Download,
+  Upload,
 } from 'lucide-react';
 
 export const InventoryPage: React.FC = () => {
@@ -22,6 +24,9 @@ export const InventoryPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'LOW' | 'OUT'>('ALL');
   const [loading, setLoading] = useState(true);
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState('');
+  const [importError, setImportError] = useState('');
 
   // Adjustment Modal
   const [showAdjustModal, setShowAdjustModal] = useState(false);
@@ -53,6 +58,55 @@ export const InventoryPage: React.FC = () => {
   useEffect(() => {
     fetchInventory();
   }, []);
+
+  const downloadImportTemplate = () => {
+    const template = 'sku,quantity,min_stock_level,reorder_level\n';
+    const url = URL.createObjectURL(new Blob([template], { type: 'text/csv' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'inventory-import-template.csv';
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleInventoryImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    setImportMessage('');
+    setImportError('');
+    if (!file) return;
+    if (!selectedWarehouse) {
+      setImportError('Choose a warehouse before importing stock.');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+    setImporting(true);
+    try {
+      const response = await api.post(
+        `/inventory/import?warehouse_id=${encodeURIComponent(selectedWarehouse)}`,
+        formData,
+        { headers: { 'Content-Type': 'multipart/form-data' } },
+      );
+      const { created, updated, unchanged } = response.data;
+      setImportMessage(
+        `Import complete: ${created} new, ${updated} updated, ${unchanged} unchanged.`,
+      );
+      await fetchInventory();
+    } catch (error) {
+      const detail = (error as { response?: { data?: { detail?: unknown } } }).response?.data?.detail;
+      setImportError(
+        typeof detail === 'string'
+          ? detail
+          : detail
+            ? JSON.stringify(detail)
+            : 'Could not import inventory. Check the file and try again.',
+      );
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const openAdjustModal = (item: InventoryItem) => {
     setAdjustItem(item);
@@ -112,10 +166,34 @@ export const InventoryPage: React.FC = () => {
             <WarehouseIcon className="w-6 h-6 text-blue-600" /> Multi-Warehouse Inventory Management
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Track available, reserved, incoming, and damaged quantities across all distribution hubs with verified transaction history.
+            Track available, reserved, incoming, and damaged quantities across distribution hubs. Select a warehouse below before importing a CSV stock count.
           </p>
         </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={downloadImportTemplate}
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg inline-flex items-center gap-2"
+          >
+            <Download className="w-4 h-4" /> CSV Template
+          </button>
+          <label className={`px-3 py-2 text-white text-xs font-semibold rounded-lg inline-flex items-center gap-2 ${importing ? 'bg-blue-400' : 'bg-blue-600 hover:bg-blue-700 cursor-pointer'}`}>
+            <Upload className="w-4 h-4" /> {importing ? 'Importing...' : 'Import Stock CSV'}
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              onChange={handleInventoryImport}
+              disabled={importing}
+              className="hidden"
+            />
+          </label>
+        </div>
       </div>
+
+      {(importMessage || importError) && (
+        <div className={`rounded-lg px-4 py-3 text-sm ${importError ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>
+          {importError || importMessage}
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-4">

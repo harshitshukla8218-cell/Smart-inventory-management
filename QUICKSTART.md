@@ -12,6 +12,12 @@ Welcome to the **Smart Inventory & Procurement Management System**!
 
 ## 🏃 Running the Application (2 Simple Steps)
 
+The backend uses a persistent SQLite database at `backend/smart_inventory.db`
+by default. On its first start, it creates the schema and loads demo data if the
+database is empty. Set `DATABASE_URL` to a PostgreSQL connection string when
+using a hosted database; keep production credentials in your hosting provider's
+environment settings, not in source control.
+
 ### Step 1: Start Backend
 Open a terminal in `backend`:
 ```bash
@@ -19,8 +25,12 @@ cd backend
 pip install -r requirements.txt
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
-> The pre-seeded database `smart_inventory.db` is already included with all realistic demo data.  
-> You can also re-seed anytime with: `python seed.py`
+> On a fresh database, startup initializes and seeds it automatically. To load
+> a fresh demo dataset manually, run `python init_db.py` from `backend`.
+> For real opening stock, download the CSV template on the Inventory page,
+> select a warehouse, and import rows using existing product SKUs. The
+> `quantity` column is the current available stock count; imports are validated
+> before applying and recorded in the inventory transaction audit.
 
 - **API Documentation**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **Health Check**: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
