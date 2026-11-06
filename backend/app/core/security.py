@@ -1,8 +1,19 @@
 from datetime import datetime, timedelta
 from typing import Optional
+from uuid import UUID
 from jose import JWTError, jwt
 import bcrypt
 from app.core.config import settings
+
+
+def get_token_subject_id(payload: dict) -> Optional[UUID]:
+    subject = payload.get("sub")
+    if not isinstance(subject, str):
+        return None
+    try:
+        return UUID(subject)
+    except ValueError:
+        return None
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

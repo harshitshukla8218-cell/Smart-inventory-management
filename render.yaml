@@ -5,13 +5,13 @@ services:
     plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: python -c "import asyncio; from app.core.database import create_tables; asyncio.run(create_tables())" && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: python init_db.py && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.8
       - key: DATABASE_URL
-        value: sqlite+aiosqlite:///./smart_inventory.db
+        sync: false
       - key: ENVIRONMENT
         value: production
       - key: SECRET_KEY

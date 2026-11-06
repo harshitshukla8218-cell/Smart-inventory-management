@@ -18,3 +18,5 @@ dist-ssr/
 .vscode/
 .idea/
 .DS_Store
+.neon
+.env.local

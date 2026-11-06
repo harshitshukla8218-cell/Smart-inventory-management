@@ -2,7 +2,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
-from app.core.security import verify_token
+from app.core.security import get_token_subject_id, verify_token
 from app.models.user import User
 from app.websockets.manager import manager
 import logging
@@ -24,7 +24,10 @@ async def websocket_notifications(
         await websocket.close(code=4001, reason="Invalid token")
         return
 
-    user_id = payload.get("sub")
+    user_id = get_token_subject_id(payload)
+    if user_id is None:
+        await websocket.close(code=4001, reason="Invalid token subject")
+        return
     result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))
     user = result.scalar_one_or_none()
     if not user:

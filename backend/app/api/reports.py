@@ -1,19 +1,262 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from typing import Optional
-from datetime import datetime, date
+from sqlalchemy import case, select, func
+from datetime import datetime, timezone
 import io
 from app.core.database import get_db
 from app.api.deps import get_current_user, require_management
 from app.models.user import User
-from app.models.inventory import Inventory
+from app.models.inventory import Inventory, InventoryTransaction, Warehouse
 from app.models.sales_order import SalesOrder, SalesOrderStatus
-from app.models.purchase_order import PurchaseOrder
-from app.models.procurement import ProcurementRequest
+from app.models.purchase_order import PurchaseOrder, POStatus
+from app.models.procurement import ProcurementRequest, ProcurementStatus
+from app.models.product import Product, Category
+from app.models.allocation import ProductAllocation, AllocationStatus
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
+
+
+@router.get("/kpis")
+async def dashboard_kpis(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    product_stock = (
+        select(
+            Inventory.product_id.label("product_id"),
+            func.sum(Inventory.available_quantity).label("available"),
+            func.sum(Inventory.reorder_level).label("reorder_level"),
+        )
+        .group_by(Inventory.product_id)
+        .subquery()
+    )
+    stock_totals = await db.execute(
+        select(
+            func.coalesce(func.sum(Inventory.available_quantity), 0),
+            func.coalesce(func.sum(Inventory.incoming_quantity), 0),
+        )
+    )
+    available_stock, incoming_stock = stock_totals.one()
+    product_counts = await db.execute(
+        select(
+            func.count(Product.id),
+            func.count(
+                case(
+                    (func.coalesce(product_stock.c.available, 0) <= 0, Product.id),
+                    else_=None,
+                )
+            ),
+            func.count(
+                case(
+                    (
+                        func.coalesce(product_stock.c.available, 0)
+                        <= func.coalesce(product_stock.c.reorder_level, 0),
+                        Product.id,
+                    ),
+                    else_=None,
+                )
+            ),
+        ).outerjoin(product_stock, product_stock.c.product_id == Product.id)
+    )
+    total_products, out_of_stock, low_stock = product_counts.one()
+    pending_procurement = await db.scalar(
+        select(func.count(ProcurementRequest.id)).where(
+            ProcurementRequest.status.not_in(
+                [ProcurementStatus.COMPLETED, ProcurementStatus.CANCELLED]
+            )
+        )
+    )
+    active_purchase_orders = await db.scalar(
+        select(func.count(PurchaseOrder.id)).where(
+            PurchaseOrder.status.not_in([POStatus.COMPLETED, POStatus.CANCELLED])
+        )
+    )
+    pending_sales_orders = await db.scalar(
+        select(func.count(SalesOrder.id)).where(
+            SalesOrder.status.not_in(
+                [SalesOrderStatus.COMPLETED, SalesOrderStatus.CANCELLED]
+            )
+        )
+    )
+    completed_orders = await db.scalar(
+        select(func.count(SalesOrder.id)).where(
+            SalesOrder.status == SalesOrderStatus.COMPLETED
+        )
+    )
+    allocated_products = await db.scalar(
+        select(func.coalesce(func.sum(ProductAllocation.quantity_allocated), 0)).where(
+            ProductAllocation.status == AllocationStatus.ACTIVE
+        )
+    )
+
+    return {
+        "total_products": total_products or 0,
+        "available_stock": available_stock or 0,
+        "out_of_stock": out_of_stock or 0,
+        "low_stock": low_stock or 0,
+        "pending_procurement": pending_procurement or 0,
+        "active_purchase_orders": active_purchase_orders or 0,
+        "incoming_warehouse": incoming_stock or 0,
+        "pending_sales_orders": pending_sales_orders or 0,
+        "allocated_products": allocated_products or 0,
+        "completed_orders": completed_orders or 0,
+    }
+
+
+@router.get("/inventory-overview")
+async def dashboard_inventory_overview(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(
+            func.coalesce(Category.name, "Uncategorized").label("category"),
+            func.sum(Inventory.available_quantity).label("available"),
+            func.sum(Inventory.reserved_quantity).label("reserved"),
+            func.sum(Inventory.incoming_quantity).label("incoming"),
+        )
+        .join(Product, Inventory.product_id == Product.id)
+        .outerjoin(Category, Product.category_id == Category.id)
+        .group_by(Category.name)
+        .order_by(Category.name)
+    )
+    return [
+        {
+            "category": row.category,
+            "available": row.available or 0,
+            "reserved": row.reserved or 0,
+            "incoming": row.incoming or 0,
+        }
+        for row in result
+    ]
+
+
+@router.get("/stock-chart")
+async def dashboard_stock_chart(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(
+            func.coalesce(func.sum(Inventory.available_quantity), 0),
+            func.coalesce(func.sum(Inventory.reserved_quantity), 0),
+            func.coalesce(func.sum(Inventory.incoming_quantity), 0),
+            func.coalesce(func.sum(Inventory.damaged_quantity), 0),
+        )
+    )
+    available, reserved, incoming, damaged = result.one()
+    return [
+        {"name": "Available", "value": available},
+        {"name": "Reserved", "value": reserved},
+        {"name": "Incoming", "value": incoming},
+        {"name": "Damaged", "value": damaged},
+    ]
+
+
+def _trailing_months(month_count: int = 6) -> list[tuple[datetime, str]]:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    current_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    months = []
+    for offset in range(month_count - 1, -1, -1):
+        month_index = current_month.month - 1 - offset
+        year = current_month.year + month_index // 12
+        month = month_index % 12 + 1
+        month_start = current_month.replace(year=year, month=month)
+        months.append((month_start, month_start.strftime("%b")))
+    return months
+
+
+@router.get("/procurement-expenses")
+async def dashboard_procurement_expenses(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    months = _trailing_months()
+    result = await db.execute(
+        select(PurchaseOrder.order_date, PurchaseOrder.total_amount).where(
+            PurchaseOrder.order_date >= months[0][0],
+            PurchaseOrder.status != POStatus.CANCELLED,
+        )
+    )
+    amounts_by_month = {month.strftime("%Y-%m"): 0.0 for month, _ in months}
+    for order_date, amount in result:
+        key = order_date.strftime("%Y-%m")
+        if key in amounts_by_month:
+            amounts_by_month[key] += float(amount or 0)
+    return [
+        {"month": month_label, "amount": amounts_by_month[month.strftime("%Y-%m")]}
+        for month, month_label in months
+    ]
+
+
+@router.get("/sales-stats")
+async def dashboard_sales_stats(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    months = _trailing_months()
+    result = await db.execute(
+        select(SalesOrder.created_at).where(SalesOrder.created_at >= months[0][0])
+    )
+    orders_by_month = {month.strftime("%Y-%m"): 0 for month, _ in months}
+    for (created_at,) in result:
+        key = created_at.strftime("%Y-%m")
+        if key in orders_by_month:
+            orders_by_month[key] += 1
+    return [
+        {"month": month_label, "orders": orders_by_month[month.strftime("%Y-%m")]}
+        for month, month_label in months
+    ]
+
+
+@router.get("/low-stock-alerts")
+async def dashboard_low_stock_alerts(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(Inventory, Product, Warehouse)
+        .join(Product, Inventory.product_id == Product.id)
+        .join(Warehouse, Inventory.warehouse_id == Warehouse.id)
+        .where(Inventory.available_quantity <= Inventory.reorder_level)
+        .order_by(Inventory.available_quantity, Product.name)
+        .limit(20)
+    )
+    return [
+        {
+            "product_id": str(inventory.product_id),
+            "product_name": product.name,
+            "sku": product.sku,
+            "warehouse": warehouse.name,
+            "available": inventory.available_quantity,
+            "reorder_level": inventory.reorder_level,
+            "status": "OUT_OF_STOCK" if inventory.available_quantity == 0 else "LOW_STOCK",
+        }
+        for inventory, product, warehouse in result
+    ]
+
+
+@router.get("/recent-activities")
+async def dashboard_recent_activities(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(InventoryTransaction)
+        .order_by(InventoryTransaction.created_at.desc())
+        .limit(10)
+    )
+    return [
+        {
+            "id": str(transaction.id),
+            "type": transaction.transaction_type.value,
+            "reference_type": transaction.reference_type,
+            "quantity_change": transaction.quantity_change,
+            "created_at": transaction.created_at,
+        }
+        for transaction in result.scalars()
+    ]
 
 
 @router.get("/inventory/summary")
